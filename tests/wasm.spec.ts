@@ -10,9 +10,22 @@
  * Signed out there is no upload button, so the workers are driven directly,
  * over the same messages makeLgtm sends (src/lib/lgtm/index.ts).
  */
+import { readFileSync } from "node:fs";
+
 import { expect, type Page, test } from "@playwright/test";
 
 const BASE_URL = process.env.BASE_URL ?? "http://localhost:3000";
+
+/**
+ * A HEIC the way iPhones store a portrait photo: landscape pixels (a gradient,
+ * orange at the top) with a quarter turn clockwise (irot) to show them upright.
+ * Made with ImageMagick 7.1 (libheif and x265):
+ *   magick -size 1200x600 gradient:'#ff8800'-'#0088ff' -depth 8 \
+ *     -orient RightTop -quality 50 tests/portrait.heic
+ */
+const portraitHeic = new Uint8Array(
+  readFileSync(new URL("portrait.heic", import.meta.url)),
+);
 
 /**
  * A two-frame animated GIF of w x h. The LZW data puts a clear code before
@@ -81,8 +94,8 @@ type Converted = {
 
 /**
  * Converts one picture in the page with the app's own workers and reads the
- * WebP back. `source` is GIF bytes, or a PNG of that size drawn in the page
- * (decoded by the browser rather than giflib).
+ * WebP back. `source` is the file's bytes (a GIF, a HEIC), or a PNG of that
+ * size drawn in the page (decoded by the browser rather than giflib).
  */
 async function convert(
   page: Page,
@@ -93,7 +106,8 @@ async function convert(
     async ({ workers, source }) => {
       let file: Blob;
       if (Array.isArray(source)) {
-        file = new Blob([new Uint8Array(source)], { type: "image/gif" });
+        // No type: the worker goes by the bytes, as with a dropped file.
+        file = new Blob([new Uint8Array(source)]);
       } else {
         const [w, h] = source.png;
         const canvas = new OffscreenCanvas(w, h);
@@ -157,9 +171,9 @@ async function convert(
 const expectColour = (got: number[], want: number[]) =>
   want.forEach((c, i) => expect(Math.abs(got[i] - c)).toBeLessThan(40));
 
-test("wasm converts a PNG and a GIF to WebP", async ({ page }) => {
+test("wasm converts a PNG, a GIF and a HEIC to WebP", async ({ page }) => {
   const errors: string[] = [];
-  const wasm: number[] = [];
+  const wasm: { url: string; status: number }[] = [];
   const scripts: Promise<{ url: string; body: string }>[] = [];
   page.on("pageerror", (e) => errors.push(e.message));
   page.on("console", (m) => {
@@ -173,7 +187,7 @@ test("wasm converts a PNG and a GIF to WebP", async ({ page }) => {
   page.on("requestfailed", (r) => errors.push(`${r.url()} failed`));
   page.on("response", (r) => {
     const url = r.url();
-    if (url.endsWith(".wasm")) wasm.push(r.status());
+    if (url.endsWith(".wasm")) wasm.push({ url, status: r.status() });
     if (url.endsWith(".js") && r.ok())
       scripts.push(
         r.text().then(
@@ -232,7 +246,26 @@ test("wasm converts a PNG and a GIF to WebP", async ({ page }) => {
     progress: 2,
   });
 
+  // A portrait HEIC: Chromium cannot read HEIF, so libheif decodes it, turns
+  // it upright and it is fitted within 960px.
+  const { corner: heicCorner, ...heic } = await convert(
+    page,
+    workers,
+    portraitHeic,
+  );
+  // The orange top edge is now on the right; the corner is the blue end.
+  expectColour(heicCorner, [0, 136, 255]);
+  expect(heic).toEqual({
+    head: "RIFF....WEBP",
+    anim: false,
+    width: 480,
+    height: 960,
+    progress: 1,
+  });
+
   expect(wasm.length).toBeGreaterThan(0);
-  expect(wasm.every((s) => s === 200)).toBe(true);
+  expect(wasm.every((w) => w.status === 200)).toBe(true);
+  // The HEIF module was fetched, so it is libheif that read the HEIC.
+  expect(wasm.some((w) => w.url.includes("heif-wasm"))).toBe(true);
   expect(errors).toEqual([]);
 });

@@ -1,6 +1,7 @@
 # The wasm the browser uses to make LGTM images: our bindings (wasm/lgtm.cpp)
-# over libwebp and giflib, with wasm SIMD on. Built here rather than committed;
-# scripts/build-wasm.sh builds the wasm-out stage to get the same two files for
+# over libwebp and giflib, with wasm SIMD on, and HEIF in a module of its own
+# (the heif stage below). Built here rather than committed;
+# scripts/build-wasm.sh builds the wasm-out stage to get the same files for
 # local development.
 #
 # -msimd128 enables wasm SIMD, and -msse2/-msse4.1 make libwebp compile its
@@ -47,9 +48,55 @@ RUN mkdir /out \
 	&& { printf '// @ts-nocheck\n'; cat /out/lgtm-wasm.js; } > /out/lgtm-wasm.js.tmp \
 	&& mv /out/lgtm-wasm.js.tmp /out/lgtm-wasm.js
 
-# Only lgtm-wasm.{js,wasm}, for `--target wasm-out --output ...`.
+# HEIF (iPhone photos) for the browsers that cannot read it themselves:
+# libheif over libde265, bound in wasm/heif.cpp. A module of its own, so that
+# converting anything else never downloads it. libde265's SSE code is not
+# built: its CMake looks for an x86 target, which wasm is not.
+FROM emscripten/emsdk:7.0.1 AS heif
+WORKDIR /tmp
+ENV FLAGS="-O3 -msimd128"
+# libde265 v1.1.3, the library alone.
+RUN git clone -q https://github.com/strukturag/libde265.git libde265 \
+	&& git -C libde265 checkout -q ba62bf4cfb3242f3bf0a45617ff09e35236e4d82 \
+	&& emcmake cmake -S libde265 -B libde265/build \
+		-DCMAKE_BUILD_TYPE=Release \
+		-DCMAKE_C_FLAGS="$FLAGS" -DCMAKE_CXX_FLAGS="$FLAGS" \
+		-DCMAKE_INSTALL_PREFIX=/tmp/heif \
+		-DBUILD_SHARED_LIBS=OFF -DENABLE_SDL=OFF -DENABLE_DECODER=OFF >/dev/null \
+	&& make -s -C libde265/build -j"$(nproc)" install >/dev/null
+# libheif v1.23.7, reading HEVC through libde265 and nothing else. Built by
+# Emscripten it binds its own JS API into the library; the standalone define
+# leaves that out, heif.cpp being the binding here.
+RUN git clone -q https://github.com/strukturag/libheif.git libheif \
+	&& git -C libheif checkout -q 12a259a5882dd99d45ec5fc77e296a3b620d1e2e \
+	&& emcmake cmake -S libheif -B libheif/build \
+		-DCMAKE_BUILD_TYPE=Release \
+		-DCMAKE_C_FLAGS="$FLAGS -D__EMSCRIPTEN_STANDALONE_WASM__" \
+		-DCMAKE_CXX_FLAGS="$FLAGS -D__EMSCRIPTEN_STANDALONE_WASM__" \
+		-DCMAKE_INSTALL_PREFIX=/tmp/heif \
+		-DBUILD_SHARED_LIBS=OFF -DENABLE_PLUGIN_LOADING=OFF \
+		-DENABLE_MULTITHREADING_SUPPORT=OFF \
+		-DLIBDE265_INCLUDE_DIR=/tmp/heif/include \
+		-DLIBDE265_LIBRARY=/tmp/heif/lib/libde265.a \
+		-DWITH_X265=OFF -DWITH_X264=OFF -DWITH_OpenH264_DECODER=OFF \
+		-DWITH_AOM_DECODER=OFF -DWITH_AOM_ENCODER=OFF -DWITH_LIBSHARPYUV=OFF \
+		-DWITH_EXAMPLES=OFF -DWITH_GDK_PIXBUF=OFF -DBUILD_TESTING=OFF >/dev/null \
+	&& make -s -C libheif/build -j"$(nproc)" install >/dev/null
+COPY wasm/heif.cpp /src/
+RUN mkdir /out \
+	&& em++ $FLAGS -std=c++17 -lembind -I /tmp/heif/include \
+		-s EXPORT_ES6=1 -s MODULARIZE=1 -s ENVIRONMENT=worker \
+		-s ALLOW_MEMORY_GROWTH=1 -s MAXIMUM_MEMORY=4GB \
+		-o /out/heif-wasm.js \
+		/src/heif.cpp /tmp/heif/lib/libheif.a /tmp/heif/lib/libde265.a \
+	&& { printf '// @ts-nocheck\n'; cat /out/heif-wasm.js; } > /out/heif-wasm.js.tmp \
+	&& mv /out/heif-wasm.js.tmp /out/heif-wasm.js
+
+# Only lgtm-wasm.{js,wasm} and heif-wasm.{js,wasm}, for
+# `--target wasm-out --output ...`.
 FROM scratch AS wasm-out
 COPY --from=wasm /out/ /
+COPY --from=heif /out/ /
 
 FROM oven/bun:1.4.5-slim AS base
 WORKDIR /usr/src/app

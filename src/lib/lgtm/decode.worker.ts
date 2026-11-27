@@ -7,10 +7,14 @@
  *
  * GIFs and animated WebP are decoded by giflib and libwebp (wasm); anything
  * else by the browser's own createImageBitmap, which also honours the EXIF
- * orientation of a photo. Resizing and the overlay are plain canvas drawing.
+ * orientation of a photo. A HEIF (an iPhone photo) that the browser cannot
+ * read -- Chrome and Firefox cannot, Safari can -- goes to libheif (wasm).
+ * Resizing and the overlay are plain canvas drawing.
  */
 import lgtmUrl from "../assets/lgtm.webp?url";
 import type { Ack, Connect, Job, ToEncoder } from "./protocol";
+import heifFactory, { type HeifWasm } from "./vendor/heif-wasm.js";
+import heifWasmUrl from "./vendor/heif-wasm.wasm?url";
 import { loadWasm } from "./wasm";
 
 /** Longest side of what gets stored. */
@@ -45,6 +49,13 @@ const loadLgtm = () => {
     .then((r) => r.blob())
     .then((b) => createImageBitmap(b));
   return lgtm;
+};
+
+// Downloaded only when a HEIF turns up that the browser cannot read.
+let heif: Promise<HeifWasm> | undefined;
+const loadHeif = () => {
+  heif ??= heifFactory({ locateFile: () => heifWasmUrl });
+  return heif;
 };
 
 /** Fits the source within MAX_SIDE and draws the mark on top. */
@@ -99,6 +110,35 @@ const isAnimatedWebP = (b: Uint8Array) => {
   );
 };
 
+/**
+ * HEIF holding HEVC, as iPhones save photos: an ISO BMFF file whose leading
+ * `ftyp` box lists "heic" or "heix" among its brands.
+ */
+const isHeic = (b: Uint8Array) => {
+  const tag = (at: number) => String.fromCharCode(...b.subarray(at, at + 4));
+  if (b.length < 16 || tag(4) !== "ftyp") return false;
+  // The box: its size, "ftyp", the major brand, a version, then compatible
+  // brands to the end of the box.
+  const size = new DataView(b.buffer, b.byteOffset, b.byteLength).getUint32(0);
+  const brands = [tag(8)];
+  for (let at = 16; at + 4 <= Math.min(size, b.length); at += 4)
+    brands.push(tag(at));
+  return brands.some((brand) => brand === "heic" || brand === "heix");
+};
+
+/** A HEIF decoded by libheif, for a browser that cannot read it itself. */
+async function decodeHeic(bytes: Uint8Array) {
+  const image = (await loadHeif()).decode(bytes);
+  if (!image) throw new Error("undecodable image");
+  return createImageBitmap(
+    new ImageData(
+      new Uint8ClampedArray(image.data.buffer),
+      image.width,
+      image.height,
+    ),
+  );
+}
+
 async function convert({ id, file }: Job) {
   const mark = await loadLgtm();
   const bytes = new Uint8Array(await file.arrayBuffer());
@@ -134,7 +174,10 @@ async function convert({ id, file }: Job) {
       dec.delete();
     }
   } else {
-    const bitmap = await createImageBitmap(file);
+    const bitmap = await createImageBitmap(file).catch((e) => {
+      if (!isHeic(bytes)) throw e;
+      return decodeHeic(bytes);
+    });
     const stamper = new Stamper(bitmap.width, bitmap.height, mark);
     send({
       type: "begin",

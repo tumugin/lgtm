@@ -90,9 +90,10 @@
   });
 </script>
 
+<!-- HEIC を画像として登録していない OS もあり、image/* だけでは選べないことがあるので拡張子も並べる -->
 <input
   bind:this={inputRef}
-  accept="image/*"
+  accept="image/*,.heic,.heif"
   type="file"
   multiple
   onchange={() => {

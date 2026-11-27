@@ -8,13 +8,18 @@ xool から分離したもので、ポスト通信簿は <https://github.com/dan
 
 画像をアップロードすると LGTM を重ねて webp で保存します。長辺 960px に収め、
 アニメーション(GIF・WebP)はそのまま残ります。EXIF の向きも反映します。
+iPhone で撮った HEIF (HEIC) もそのまま上げられます。
 
 変換はブラウザの中でやります。Web Worker を 2 つ並べたパイプラインで、片方が画像を
-読み込んで(GIF は giflib、アニメーション WebP は libwebp、それ以外はブラウザ自身)
+読み込んで(GIF は giflib、アニメーション WebP は libwebp、それ以外はブラウザ自身。
+ブラウザが読めない HEIF は libheif)
 Canvas で縮小と LGTM の合成をし、できたフレームから順にもう片方へ渡して libwebp で
 WebP にします。読み込みとエンコードが同時に進むので、長いアニメーションでも速く
 終わります。giflib と libwebp は `wasm/lgtm.cpp` のバインディングと一緒に SIMD 有効で
 wasm にしたもので、イメージのビルド (`Dockerfile` の `wasm` ステージ) で作ります。
+libheif (HEVC は libde265 で読みます) は `wasm/heif.cpp` で別の wasm にしてあり
+(`heif` ステージ)、Chrome や Firefox で HEIF を変換するときだけ読み込みます。
+HEIF を読める Safari では使いません。
 サーバーは届いた
 ファイルが WebP であること・長辺 960px 以内・30MB 以内であることだけを確かめて
 そのまま保存します。LGTM が載っているかまでは確かめられないので、素の画像を上げる
@@ -54,9 +59,9 @@ GitHub のみです。𝕏 でのログインは xool から分離したとき�
 ./s.sh i
 ```
 
-`./s.sh i` は最初にブラウザ用の wasm (`src/lib/lgtm/vendor/lgtm-wasm.{js,wasm}`) も
-作ります。生成物なのでコミットしていません。`wasm/` か `Dockerfile` の `wasm` ステージを
-変えたら作り直します。中身はイメージと同じステージをビルドして取り出すだけで、変わって
+`./s.sh i` は最初にブラウザ用の wasm (`src/lib/lgtm/vendor/{lgtm,heif}-wasm.{js,wasm}`)
+も作ります。生成物なのでコミットしていません。`wasm/` か `Dockerfile` の `wasm`・`heif`
+ステージを変えたら作り直します。中身はイメージと同じステージをビルドして取り出すだけで、変わって
 いなければキャッシュで一瞬です。
 
 ```sh
@@ -64,9 +69,9 @@ GitHub のみです。𝕏 でのログインは xool から分離したとき�
 ./scripts/build-wasm.sh wslc   # docker の代わりに wslc
 ```
 
-CI (Docker Build Check) はイメージをビルドしたあと起動し、Chromium で PNG と GIF を
-実際に WebP へ変換できるか確かめます (`tests/wasm.spec.ts`)。emsdk の更新は自動で
-マージされるので、ビルドが通るだけでなく wasm が動くことまでここで見ます。手元では
+CI (Docker Build Check) はイメージをビルドしたあと起動し、Chromium で PNG と GIF と
+HEIC を実際に WebP へ変換できるか確かめます (`tests/wasm.spec.ts`)。emsdk の更新は
+自動でマージされるので、ビルドが通るだけでなく wasm が動くことまでここで見ます。手元では
 ビルドしたイメージを起動して、それに対して流せます (`BASE_URL` で向き先を変えられます)。
 
 ```sh
